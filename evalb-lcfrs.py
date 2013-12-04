@@ -15,8 +15,8 @@ from collections import defaultdict, Counter  # multiset implementation
 USAGE = """Usage: %s [OPTIONS]
 
 Extension of the evalb program, to evaluate discontinuous constituency trees.
-In the absence of discontinuity,this program should yield the same results as
-evalb, but you should check that for yourself. This program returns
+In the absence of discontinuity, this program should yield the same results as
+EVALB, but you should check that for yourself. This program returns
 precision, recall, f-measure and exact match. It expects its input data to be
 in export format (Brants 1997).
 
@@ -81,7 +81,8 @@ def read_param(filename):
         if line and not line.startswith('#'):
             key, val = line.split(None, 1)
             if key in validkeysonce:
-                assert key not in seen, 'cannot declare %s twice' % key
+                if key in seen:
+                    raise ValueError('cannot declare %s twice' % key)
                 seen.add(key)
                 param[key] = int(val)
             elif key in ('DELETE_LABEL', 'DELETE_LABEL_FOR_LENGTH',
@@ -99,9 +100,9 @@ def read_param(filename):
     return param
 
 
-def exportsplit(line):
+def export_split(line):
     """ Take a line in export format and split into fields,
-    add dummy fields lemma, sec. edge if those fields are absent. """
+    add dummy fields lemma, sec. edge if those fields are absent."""
     if "%%" in line:  # we don't want comments.
         line = line[:line.index("%%")]
     fields = line.split()
@@ -115,24 +116,17 @@ def exportsplit(line):
         # NB: zero or more sec. edges come in pairs of parent id and label
         raise ValueError(
                 'expected 5 or 6+ even number of columns: %r' % fields)
-    return fields
-
-
-def export_check_line(line):
-    """Checks some properties of a splitted export format node line"""
-    # make sure there were enough fields
-    assert len(line) > 4, "line seems to be lacking fields: " + line
     # check first field
-    if line[NODE].startswith('#'):
-        assert len(line[NODE]) == 4 and line[NODE][1:].isdigit(), (
-            "first field looks wrong: " + line)
-    # make sure the parent number is three digits long
-    assert line[PARENT].isdigit(), (
-            "6th field must contain parent number: %s" % line)
-    # make sure it's usable
-    parent = int(line[PARENT])
-    assert parent >= 500 or parent == 0, ("the parent number must be "
-            ">= 500 or = 0, got %s" % parent)
+    if fields[NODE].startswith('#'):
+        nodenum = int(fields[NODE][1:])
+        if not (nodenum == 0 or 500 <= nodenum <= 999):
+            raise ValueError("node number must >= 500 and <= 999")
+    # make sure the parent number is valid
+    parent = int(fields[PARENT])
+    if not (500 <= parent <= 999 or parent == 0):
+        raise ValueError("the parent number must be "
+                "0 or >= 500 and <= 999, got %s" % parent)
+    return fields
 
 
 def export_process_sentence(sentence, labels_by_nodenum, tuples_by_nodenum,
@@ -140,15 +134,12 @@ def export_process_sentence(sentence, labels_by_nodenum, tuples_by_nodenum,
     """In a syntactic tree given in export-format as a list of lines in the
     array sentence, recursively determine top-down which are the terminals
     dominated by the node with the number nodenum."""
-    # make sure the node number refers a non-terminal
-    assert nodenum == 0 or nodenum >= 500
+    # make sure the node number refers to a non-terminal
     # get the label
     label = labels_by_nodenum[nodenum]
     # get the terminals
     tuples_by_nodenum[nodenum] = (label, set())
-    for linenum, line in enumerate(sentence):
-        fields = exportsplit(line)
-        export_check_line(fields)
+    for linenum, fields in enumerate(sentence):
         parent = int(fields[PARENT])
         if parent == nodenum:
             if fields[NODE].startswith('#'):
@@ -187,14 +178,11 @@ def read_from_export(filename, param, encoding='utf8'):
                 within_sentence = False
                 # get the sentence number from the EOS line
                 sentnum = int(line.split(None, 1)[1])
-                # remove BOS and EOS lines
-                sentence = sentence[1:-1]
+                # remove BOS and EOS lines, split lines into fields
+                sentence = [export_split(a) for a in sentence[1:-1]]
                 # extract all non-terminal labels
-                labels_by_nodenum = dict(
-                        (int(exportsplit(nodeline)[NODE][1:]),
-                        exportsplit(nodeline)[TAG])
-                        for nodeline in sentence
-                        if nodeline.startswith('#'))
+                labels_by_nodenum = {int(fields[NODE][1:]): fields[TAG]
+                        for fields in sentence if fields[NODE].startswith('#')}
                 labels_by_nodenum[0] = u"VROOT"
                 # intialize bracketing store for this sentence
                 result[sentnum] = Counter()
@@ -217,6 +205,7 @@ def read_from_export(filename, param, encoding='utf8'):
                 # reset
                 sentence = []
                 tuples_by_nodenum = {}
+
     return result
 
 
@@ -228,8 +217,10 @@ def evaluate(k, a, param, encoding):
     # read signature from answer file
     answer_sig = read_from_export(a, param, encoding)
 
-    assert len(key_sig) > 0, "no sentences in key"
-    assert len(answer_sig) <= len(key_sig), "more sentences in answer than key"
+    if not key_sig:
+        raise ValueError("no sentences in key")
+    if len(answer_sig) > len(key_sig):
+        raise ValueError("more sentences in answer than key")
     print("""
  sent.  prec.   rec.       F1  match   gold test
 =================================================
@@ -250,8 +241,8 @@ def evaluate(k, a, param, encoding):
         sent_match = 0
         # get bracketings for key
         # there must be something for every sentence in key
-        assert sent_num in key_sig, (
-                "no data for sent. %d in key" % sent_num)
+        if sent_num not in key_sig:
+            raise ValueError("no data for sent. %d in key" % sent_num)
         key_sent_sig = key_sig[sent_num]
         # get bracketings for answer
         answer_sent_sig = None
@@ -316,9 +307,12 @@ def main():
         opts, args = getopt.getopt(sys.argv[1:], "huk:a:p:e:l:",
             ["help", "unlabeled", "key=", "answer=", "param=", "encoding=",
                 "limit="])
-        assert len(args) == 0
     except getopt.GetoptError as err:
         sys.stderr.write(str(err) + "\n")
+        print(USAGE)
+        sys.exit(1)
+    if args:
+        print("unexpected argument")
         print(USAGE)
         sys.exit(1)
     keyfile = answerfile = paramfile = None
@@ -336,8 +330,8 @@ def main():
             paramfile = val
         elif opt in ("-e", "--encoding"):
             encoding = val
-    assert keyfile is not None and answerfile is not None, (
-            "you must provide both a key and an answer file")
+    if keyfile is None or answerfile is None:
+        raise ValueError("you must provide both a key and an answer file")
     param = read_param(paramfile)
     if "-u" in opts or "--unlabeled" in opts:
         param['LABELED'] = 0
