@@ -10,26 +10,28 @@ from __future__ import print_function, division
 import io
 import sys
 import getopt
-from collections import defaultdict, Counter  # multiset implementation
+from collections import defaultdict, Counter as multiset
 
 USAGE = """Usage: %s [OPTIONS]
 
 Extension of the evalb program, to evaluate discontinuous constituency trees.
 In the absence of discontinuity, this program should yield the same results as
-EVALB, but you should check that for yourself. This program returns
-precision, recall, f-measure and exact match. It expects its input data to be
-in export format (Brants 1997).
+EVALB, but you should check that for yourself. This program returns precision,
+recall, f-measure and exact match. It expects its input data to be in export
+format (Brants 1997).
 
-Comparsion is done on the basis of "signatures", sets of bracketings
-for non-terminals. Tagging accuracy is not evaluated.
-To match the sentences which are to be compared, the program uses the
-export sentence numbering. Missing sentences in answer affect the result.
+Comparsion is done on the basis of "signatures", bags of labeled bracketings
+for non-terminals. To match the sentences which are to be compared, the program
+uses the export sentence numbering. Missing sentences in answer affect the
+result. An EVALB parameter file can be specified (e.g., the included file
+``proper.prm`` to ignore root node & punctuation).
 
 [OPTIONS]
     -k key file (gold data)
     -a answer file (parser output)
     -p evalb parameter file (optional)
     -u unlabeled evaluation
+    -l limit sentence length (e.g., 40; default is unlimited)
     -e encoding (e.g., 'latin1'; default 'utf8')
     -h show help
 
@@ -37,7 +39,6 @@ Brants, T. (1997). The NeGra Export format. CLAUS Report 98, Computational
 Linguistics Department, Saarland University, Saarbruecken, Germany.
 
 """ % sys.argv[0]
-#    -l limit sentence length (e.g., 40; default is unlimited)
 # Constants for the Export format:
 NUMFIELDS = 6
 WORD, LEMMA, TAG, MORPH, FUNC, PARENT = tuple(range(NUMFIELDS))
@@ -70,7 +71,7 @@ def read_param(filename):
     # only DELETE_LABEL is implemented for now.
     validkeysonce = ('DEBUG', 'MAX_ERROR', 'CUTOFF_LEN', 'LABELED',
             'DISC_ONLY', 'TED', 'DEP')
-    param = {'DEBUG': 0, 'MAX_ERROR': 10, 'CUTOFF_LEN': 40,
+    param = {'DEBUG': 0, 'MAX_ERROR': 10, 'CUTOFF_LEN': 9999,
                 'LABELED': 1, 'DELETE_LABEL_FOR_LENGTH': set(),
                 'DELETE_LABEL': set(), 'DELETE_WORD': set(),
                 'EQ_LABEL': set(), 'EQ_WORD': set(),
@@ -130,11 +131,10 @@ def export_split(line):
 
 
 def export_process_sentence(sentence, labels_by_nodenum, tuples_by_nodenum,
-        nodenum, param):
+        pos_tags, nodenum, param, delete_pos):
     """In a syntactic tree given in export-format as a list of lines in the
     array sentence, recursively determine top-down which are the terminals
     dominated by the node with the number nodenum."""
-    # make sure the node number refers to a non-terminal
     # get the label
     label = labels_by_nodenum[nodenum]
     # get the terminals
@@ -146,20 +146,27 @@ def export_process_sentence(sentence, labels_by_nodenum, tuples_by_nodenum,
                 # recursion: non-terminal
                 childnum = int(fields[NODE][1:])
                 export_process_sentence(sentence, labels_by_nodenum,
-                        tuples_by_nodenum, childnum, param)
+                        tuples_by_nodenum, pos_tags, childnum, param,
+                        delete_pos)
                 tuples_by_nodenum[nodenum][1].update(
                         tuples_by_nodenum[childnum][1])
-            elif fields[TAG] not in param.get('DELETE_LABEL', ()):
+            else:
                 # base case: terminal
                 # only add terminals with non-deleted POS tags
-                tuples_by_nodenum[nodenum][1].add(linenum + 1)
+                if fields[TAG] not in param.get('DELETE_LABEL', ()):
+                    tuples_by_nodenum[nodenum][1].add(linenum + 1)
+                # for key file length calculation is based on
+                # DELETE_LABEL_FOR_LENGTH
+                if fields[TAG] not in param.get(delete_pos, ()):
+                    pos_tags.add((linenum, fields[TAG]))
 
 
-def read_from_export(filename, param, encoding='utf8'):
+def read_from_export(filename, param, delete_pos, encoding):
     """Read a signature from an export-format file.
     Returns a dict which maps sentence numbers to lists of bracketings."""
     # will be returned
-    result = {}
+    signatures = {}
+    pos_tags = {}
     # for reading export data
     within_sentence = False
     sentence = []
@@ -177,7 +184,7 @@ def read_from_export(filename, param, encoding='utf8'):
                 # complete sentence collected, process it
                 within_sentence = False
                 # get the sentence number from the EOS line
-                sentnum = int(line.split(None, 1)[1])
+                sent_num = int(line.split(None, 1)[1])
                 # remove BOS and EOS lines, split lines into fields
                 sentence = [export_split(a) for a in sentence[1:-1]]
                 # extract all non-terminal labels
@@ -185,11 +192,13 @@ def read_from_export(filename, param, encoding='utf8'):
                         for fields in sentence if fields[NODE].startswith('#')}
                 labels_by_nodenum[0] = u"VROOT"
                 # intialize bracketing store for this sentence
-                result[sentnum] = Counter()
+                signatures[sent_num] = multiset()
+                pos_tags[sent_num] = set()
                 # get the non-terminal labels and the terminals which the
                 # corresponding nodes dominate
                 export_process_sentence(sentence, labels_by_nodenum,
-                        tuples_by_nodenum, 0, param)
+                        tuples_by_nodenum, pos_tags[sent_num], 0, param,
+                        delete_pos)
                 for nodenum in tuples_by_nodenum:
                     # the label of a nonterminal
                     label = tuples_by_nodenum[nodenum][0]
@@ -201,30 +210,29 @@ def read_from_export(filename, param, encoding='utf8'):
                         bracketing = Bracketing(
                                 label if param['LABELED'] else 'X',
                                 terminals)
-                        result[sentnum][bracketing] += 1
+                        signatures[sent_num][bracketing] += 1
                 # reset
                 sentence = []
                 tuples_by_nodenum = {}
+    return signatures, pos_tags
 
-    return result
 
-
-def evaluate(k, a, param, encoding):
-    """Initiate evaluation of answer file ``a``
-    against key file (gold) ``k``."""
+def evaluate(key, answer, param, encoding):
+    """Initiate evaluation of answer file against key file (gold)."""
     # read signature from key file
-    key_sig = read_from_export(k, param, encoding)
+    key_sig, key_tags = read_from_export(key, param,
+            "DELETE_LABEL_FOR_LENGTH", encoding)
     # read signature from answer file
-    answer_sig = read_from_export(a, param, encoding)
+    answer_sig, answer_tags = read_from_export(answer, param,
+            "DELETE_LABEL", encoding)
 
     if not key_sig:
         raise ValueError("no sentences in key")
     if len(answer_sig) > len(key_sig):
         raise ValueError("more sentences in answer than key")
-    print("""
- sent.  prec.   rec.       F1  match   gold test
-=================================================
-""", end='')
+    print("""\
+ sent.  prec.   rec.       F1  match   gold test words matched tags
+====================================================================""")
 
     # missing sentences
     missing = 0
@@ -234,10 +242,13 @@ def evaluate(k, a, param, encoding):
     total_key = 0
     # total number of brackets in answer
     total_answer = 0
-    exact = 0
-    #total_words = matched_pos = 0
+    total_exact = 0
+    total_words = total_matched_pos = total_sents = 0
     # get all sentence numbers from gold
     for sent_num in sorted(key_sig):
+        if len(key_tags[sent_num]) > param['CUTOFF_LEN']:
+            continue
+        total_sents += 1
         sent_match = 0
         # get bracketings for key
         # there must be something for every sentence in key
@@ -249,12 +260,12 @@ def evaluate(k, a, param, encoding):
         if sent_num in answer_sig:
             answer_sent_sig = answer_sig[sent_num]
         else:
-            answer_sent_sig = Counter()
+            answer_sent_sig = multiset()
             missing += 1
         # compute matching brackets
-        sent_match = len(key_sent_sig & answer_sent_sig)
+        sent_match = sum((key_sent_sig & answer_sent_sig).values())
         if key_sent_sig == answer_sent_sig:
-            exact += 1
+            total_exact += 1
         sent_prec = 0.0
         if len(answer_sent_sig) > 0:
             sent_prec = 100 * sent_match / len(answer_sent_sig)
@@ -264,12 +275,16 @@ def evaluate(k, a, param, encoding):
         sent_fb1 = 0.0
         if sent_prec + sent_rec > 0:
             sent_fb1 = 2 * sent_prec * sent_rec / (sent_prec + sent_rec)
-        print("%4d  %6.2f  %6.2f  %6.2f    %3d    %3d  %3d" % (
+        tag_match = len(key_tags[sent_num] & answer_tags[sent_num])
+        print("%4d  %6.2f  %6.2f  %6.2f    %3d    %3d  %3d  %3d  %3d" % (
                 sent_num, sent_prec, sent_rec, sent_fb1,
-                sent_match, len(key_sent_sig), len(answer_sent_sig)))
+                sent_match, len(key_sent_sig), len(answer_sent_sig),
+                len(answer_tags[sent_num]), tag_match))
         total_match += sent_match
         total_key += len(key_sent_sig)
         total_answer += len(answer_sent_sig)
+        total_matched_pos += tag_match
+        total_words += len(key_tags[sent_num])
 
     prec = 0.0
     if total_answer > 0:
@@ -281,24 +296,25 @@ def evaluate(k, a, param, encoding):
     if prec + rec > 0:
         fb1 = 2 * prec * rec / (prec + rec)
 
-    print("=================================================")
+    labeled = ('unlabeled', 'labeled')[param['LABELED']]
+    print("===========================================================")
     print()
     print()
-    print("Summary: ")
-    print("=========")
+    print("Summary (%s, <= %d):" % (labeled, param['CUTOFF_LEN']))
+    print("===========================================================")
     print()
-    print("Sentences missing in answer    :", missing)
+    print("Sentences in key".ljust(30), ":", total_sents)
+    print("Sentences missing in answer".ljust(30), ":", missing)
     print()
-    print("Total edges in key             :", total_key)
-    print("Total edges in answer          :", total_answer)
-    print("Total matching edges           :", total_match)
+    print("Total edges in key".ljust(30), ":", total_key)
+    print("Total edges in answer".ljust(30), ":", total_answer)
+    print("Total matching edges".ljust(30), ":", total_match)
     print()
-    #print("POS  : %6.2f " % (100 * matched_pos / total_words))
-    labeled = 'UL'[param['LABELED']]
-    print("%sP  : %6.2f %%" % (labeled, prec))
-    print("%sR  : %6.2f %%" % (labeled, rec))
-    print("%sF1 : %6.2f %%" % (labeled, fb1))
-    print("EX  : %6.2f %%" % (100 * exact / len(key_sig)))
+    print("POS : %6.2f %%" % (100 * total_matched_pos / total_words))
+    print("%sP  : %6.2f %%" % (labeled[0].upper(), prec))
+    print("%sR  : %6.2f %%" % (labeled[0].upper(), rec))
+    print("%sF1 : %6.2f %%" % (labeled[0].upper(), fb1))
+    print("EX  : %6.2f %%" % (100 * total_exact / total_sents))
 
 
 def main():
@@ -307,6 +323,7 @@ def main():
         opts, args = getopt.getopt(sys.argv[1:], "huk:a:p:e:l:",
             ["help", "unlabeled", "key=", "answer=", "param=", "encoding=",
                 "limit="])
+        opts = dict(opts)
     except getopt.GetoptError as err:
         sys.stderr.write(str(err) + "\n")
         print(USAGE)
@@ -316,27 +333,21 @@ def main():
         print(USAGE)
         sys.exit(1)
     keyfile = answerfile = paramfile = None
+    if "-h" in opts or "--help" in opts:
+        print(USAGE)
+        sys.exit()
+    keyfile = opts.get("-k", opts.get("--key"))
+    answerfile = opts.get("-a", opts.get("--answer"))
+    paramfile = opts.get("-p", opts.get("--param"))
     # Export is formally latin1, but let's promote utf8 proliferation
-    encoding = 'utf8'
-    for opt, val in opts:
-        if opt in ("-h", "--help"):
-            print(USAGE)
-            sys.exit()
-        elif opt in ("-k", "--key"):
-            keyfile = val
-        elif opt in ("-a", "--answer"):
-            answerfile = val
-        elif opt in ("-p", "--param"):
-            paramfile = val
-        elif opt in ("-e", "--encoding"):
-            encoding = val
+    encoding = opts.get("-e", opts.get("--encoding", "utf8"))
     if keyfile is None or answerfile is None:
         raise ValueError("you must provide both a key and an answer file")
     param = read_param(paramfile)
     if "-u" in opts or "--unlabeled" in opts:
         param['LABELED'] = 0
-    #if "-l" in opts or "--limit" in opts:
-    #    param['CUTOFF_LEN'] = int(val)
+    if "-l" in opts or "--limit" in opts:
+        param['CUTOFF_LEN'] = int(opts.get("--limit", opts["-l"]))
     evaluate(keyfile, answerfile, param, encoding)
 
 if __name__ == "__main__":
