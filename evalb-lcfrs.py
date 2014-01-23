@@ -103,20 +103,19 @@ def read_param(filename):
 
 def export_split(line):
     """ Take a line in export format and split into fields,
-    add dummy fields lemma, sec. edge if those fields are absent."""
+    add dummy fields lemma. Now ignoring everything behind parent
+    number, such as sec. edge and comments, because 1. secondary edges
+    are generally not used in parsing, and 2. unlike defined in Brants
+    (1997), in TueBa-D/Z 8 the fields in question are used for
+    anaphora annotation and not for secondary edges. """ 
     if "%%" in line:  # we don't want comments.
         line = line[:line.index("%%")]
     fields = line.split()
-    fieldlen = len(fields)
-    if fieldlen == 5:
+    # if 5th field is a number (the parent number), assume that 
+    # we have no lemma field
+    if fields[4].isdigit():
         fields[1:1] = ['']
-        fields.extend(['', ''])
-    elif fieldlen == 6:
-        fields.extend(['', ''])
-    elif fieldlen < 8 or fieldlen & 1:
-        # NB: zero or more sec. edges come in pairs of parent id and label
-        raise ValueError(
-                'expected 5 or 6+ even number of columns: %r' % fields)
+    fields = fields[:6]
     # check first field
     if fields[NODE].startswith('#'):
         nodenum = int(fields[NODE][1:])
