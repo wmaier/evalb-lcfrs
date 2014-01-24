@@ -4,7 +4,7 @@
 # Authors: Wolfgang Maier <maierw@hhu.de>,
 # Andreas van Cranenburgh <a.w.vancranenburgh@uva.nl>
 
-# Version: December 04, 2013
+# Version: January 24, 2014
 
 from __future__ import print_function, division
 import io
@@ -265,23 +265,25 @@ def evaluate(key, answer, param, encoding):
         sent_match = sum((key_sent_sig & answer_sent_sig).values())
         if key_sent_sig == answer_sent_sig:
             total_exact += 1
+        sent_answer = sum(answer_sent_sig.values())
         sent_prec = 0.0
         if len(answer_sent_sig) > 0:
-            sent_prec = 100 * sent_match / len(answer_sent_sig)
+            sent_prec = 100 * sent_match / sent_answer
+        sent_key = sum(key_sent_sig.values())
         sent_rec = 0.0
         if len(key_sent_sig) > 0:
-            sent_rec = 100 * sent_match / len(key_sent_sig)
+            sent_rec = 100 * sent_match / sent_key
         sent_fb1 = 0.0
         if sent_prec + sent_rec > 0:
             sent_fb1 = 2 * sent_prec * sent_rec / (sent_prec + sent_rec)
         tag_match = len(key_tags[sent_num] & answer_tags[sent_num])
         print("%4d  %6.2f  %6.2f  %6.2f    %3d    %3d  %3d  %3d  %3d" % (
                 sent_num, sent_prec, sent_rec, sent_fb1,
-                sent_match, len(key_sent_sig), len(answer_sent_sig),
+                sent_match, sent_key, sent_answer, 
                 len(answer_tags[sent_num]), tag_match))
         total_match += sent_match
-        total_key += len(key_sent_sig)
-        total_answer += len(answer_sent_sig)
+        total_key += sent_key
+        total_answer += sent_answer
         total_matched_pos += tag_match
         total_words += len(key_tags[sent_num])
 
